@@ -1,8 +1,15 @@
-# ===== LLM 配置 =====
+# ===== LLM 配置 main.py的回复（重要！！！）=====
 llm_endpoint: "https://api.qnaigc.com/v1/chat/completions"
 llm_key: "sk-密钥"
 llm_model: "deepseek/模型-v3.2-251201"
 llm_temperature: 0.8
+
+# ===== 辅助模型配置（用于切割脚本生成等辅助任务） =====
+assistant_llm:
+  endpoint: "https://api.qnaigc.com/v1/chat/completions"  # 填入辅助模型接口
+key: "sk-辅助模型密钥"                                   # 填入模型密钥
+model: "deepseek/模型-v3.2-251201"                      # 模型名称
+sample_lines: 300                                     # 读取样本行数 (可选，代码里有默认值300)
 
 # ===== AI 名称 =====
 bot_name: "梦梦"
