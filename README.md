@@ -72,6 +72,7 @@ tools/query.py是本项目核心文件，检索聊天记录并重排序提升质
 - 3.重复调用工具换聪明模型
 
 #给你们看看实际效果
+![测试](img/mmexport1775601890590.png)
 <div align="center">
   <img src="img/mmexport1775601890590.png" alt="运行效果截图 1" width="300" />
   &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
