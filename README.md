@@ -70,3 +70,10 @@ tools/query.py是本项目核心文件，检索聊天记录并重排序提升质
 所有你肯定会遇到报错，要么加上/v1/chat/completions，要么删掉/v1/chat/completions。
 - 2.在install时卡死，直接ctrl+c，重新运行。每一天基本上输入都是万token
 - 3.重复调用工具换聪明模型
+
+#给你们看看实际效果
+<div align="center">
+  <img src="img/img/mmexport1775601890590.jpg.png" alt="运行效果截图 1" width="300" />
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+  <img src="img/b.png" alt="运行效果截图 2" width="300" />
+</div>
