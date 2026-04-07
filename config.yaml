@@ -1,0 +1,20 @@
+# ===== LLM 配置 =====
+llm_endpoint: "https://api.qnaigc.com/v1/chat/completions"
+llm_key: "sk-密钥"
+llm_model: "deepseek/模型-v3.2-251201"
+llm_temperature: 0.8
+
+# ===== AI 名称 =====
+bot_name: "梦梦"
+
+# ===== 人格文件 =====
+core_md: "persona/core.MD"
+drive_md: "persona/drive.MD"
+
+# ===== 工具脚本 =====
+query_script: "tools/query.py"
+search_script: "tools/search.py"
+correction_script: "tools/correction.py"
+
+# ===== 路径 =====
+log_dir: "logs"
