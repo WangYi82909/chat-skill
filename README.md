@@ -33,7 +33,7 @@
 
 ### 1. 克隆项目
 
-确保你已安装 Python 3.8+，并安装必要的依赖：
+确保你已安装 Python 3.10+，并安装必要的依赖：
 
 ```bash
 git clone https://github.com/WangYi82909/chat-skill.git
@@ -53,7 +53,7 @@ pip3 install -r requirements.txt
 
 ### 4. 上传txt聊天记录并运行install文件
 必须填写llm配置
-聊天记录必须重命名放置在chat，格式无要求
+聊天记录必须重命名chattxt放置在根目录，聊天记录格式无要求，是聊天记录就行，一定要注意不要让ai学习了错误的模型。
 
 ```bash
 python3 install.py
