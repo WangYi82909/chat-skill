@@ -60,6 +60,12 @@ python3 install.py
 ```
 直接走完切片+向量前总结+插入数据库
 
+### 4.5.提取情绪与行为库（此文件内填写大模型密钥端点）
+根目录/install-two.py此文件
+```bash
+python3 install-two.py
+```
+
 ### 5. 配置重排序
 tools/query.py是本项目核心文件，检索聊天记录并重排序提升质量
 进入后一眼就可以看见配置框。
