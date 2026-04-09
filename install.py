@@ -1,28 +1,12 @@
-"""
-pipeline.py
-阶段 1：chat.txt 按日期切割（辅助模型生成切割脚本并执行）
-阶段 2：场景增强（主模型）
-阶段 3：向量化 + FAISS / SQLite 入库
-纯 requests，无 openai 库依赖
-"""
-
 import os
 import re
 import glob
-import sqlite3
 import logging
 import subprocess
 import numpy as np
 import requests
-from datetime import datetime
-
-try:
-    import faiss
-except ImportError:
-    print("[ERROR] 未检测到 faiss-cpu，请运行：pip install faiss-cpu")
-    raise SystemExit(1)
-
 import yaml
+from datetime import datetime
 
 # ================= 配置加载 =================
 
@@ -30,42 +14,45 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 
 def load_config(path="config.yaml"):
     p = os.path.join(BASE_DIR, path)
+    if not os.path.exists(p):
+        raise FileNotFoundError(f"配置文件不存在: {p}")
     with open(p, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+        cfg = yaml.safe_load(f)
+        if cfg is None:
+            raise ValueError(f"配置文件为空或格式错误: {p}")
+        return cfg
 
 CFG = load_config()
 
-# 主模型
-LLM_ENDPOINT     = CFG["llm"]["endpoint"]
-LLM_KEY          = CFG["llm"]["key"]
-LLM_MODEL        = CFG["llm"]["model"]
-LLM_TEMPERATURE  = CFG["llm"]["temperature"]
-EMBED_MODEL      = CFG["llm"].get("embed_model", "text-embedding-3-large")
-DIMENSION        = CFG["llm"].get("embed_dimension", 3072)
+# 主模型配置
+LLM_ENDPOINT     = CFG.get("llm_endpoint") or CFG.get("llm", {}).get("endpoint")
+LLM_KEY          = CFG.get("llm_key")      or CFG.get("llm", {}).get("key")
+LLM_MODEL        = CFG.get("llm_model", "deepseek/deepseek-v3")
+LLM_TEMPERATURE  = CFG.get("llm_temperature", 0.8)
+EMBED_MODEL      = CFG.get("embed_model", "text-embedding-3-large")
 
-# 辅助模型（切割脚本生成）
-AUX_ENDPOINT     = CFG["assistant_llm"]["endpoint"]
-AUX_KEY          = CFG["assistant_llm"]["key"]
-AUX_MODEL        = CFG["assistant_llm"]["model"]
-AUX_SAMPLE_LINES = CFG["assistant_llm"].get("sample_lines", 300)
+# 辅助模型配置
+AUX_ENDPOINT     = CFG.get("assistant_endpoint", LLM_ENDPOINT)
+AUX_KEY          = CFG.get("assistant_key", LLM_KEY)
+AUX_MODEL        = CFG.get("assistant_model", LLM_MODEL)
+AUX_SAMPLE_LINES = 300
 
-# 路径
+# 路径配置
 INPUT_CHAT_FILE  = os.path.join(BASE_DIR, "chat.txt")
-INPUT_DIR        = os.path.join(BASE_DIR, CFG["paths"].get("chat_dir",  "chat"))
-SCENE_DIR        = os.path.join(BASE_DIR, CFG["paths"].get("scene_dir", "chat/xiangliang"))
-DB_DIR           = os.path.join(BASE_DIR, CFG["paths"].get("db_dir",    "vector_db"))
-LOG_DIR          = os.path.join(BASE_DIR, CFG["paths"]["log_dir"])
+INPUT_DIR        = os.path.join(BASE_DIR, CFG.get("chat_dir", "chat"))
+SCENE_DIR        = os.path.join(BASE_DIR, CFG.get("scene_dir", "chat/xiangliang"))
+VECTOR_DIR       = os.path.join(BASE_DIR, CFG.get("vector_dir", "vectors"))
+LOG_DIR          = os.path.join(BASE_DIR, CFG.get("log_dir", "logs"))
 
-FAISS_INDEX_PATH = os.path.join(DB_DIR, "chat.index")
-SQLITE_PATH      = os.path.join(DB_DIR, "chat_meta.db")
-ID_COUNTER_PATH  = os.path.join(DB_DIR, "id_counter.txt")
-DONE_LOG         = os.path.join(LOG_DIR, "pipeline_done.txt")
+# 状态记录
+SCENE_DONE_LOG   = os.path.join(LOG_DIR, "scene_enhance_done.txt")
+VECTOR_DONE_LOG  = os.path.join(LOG_DIR, "vector_extract_done.txt")
 SPLIT_SCRIPT     = os.path.join(BASE_DIR, "auto_splitter.py")
 
-for _d in [INPUT_DIR, SCENE_DIR, DB_DIR, LOG_DIR]:
+for _d in [INPUT_DIR, SCENE_DIR, VECTOR_DIR, LOG_DIR]:
     os.makedirs(_d, exist_ok=True)
 
-# ================= 双写日志 =================
+# ================= 日志设置 =================
 
 def setup_logger():
     run_ts   = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -79,32 +66,52 @@ def setup_logger():
     lg.setLevel(logging.DEBUG)
     lg.addHandler(fh)
     lg.addHandler(ch)
-    lg.info(f"日志文件: {log_file}")
     return lg
 
 log = setup_logger()
 
-# ================= 增量记录 =================
+# ================= 增量记录逻辑 =================
 
-def get_done_files() -> set:
-    if not os.path.exists(DONE_LOG):
+def get_done_list(log_path) -> set:
+    if not os.path.exists(log_path):
         return set()
-    with open(DONE_LOG, "r", encoding="utf-8") as f:
+    with open(log_path, "r", encoding="utf-8") as f:
         return set(line.strip() for line in f if line.strip())
 
-def mark_done(filename: str):
-    with open(DONE_LOG, "a", encoding="utf-8") as f:
+def mark_done(log_path, filename: str):
+    with open(log_path, "a", encoding="utf-8") as f:
         f.write(filename + "\n")
 
-# ================= 纯 requests HTTP =================
+# ================= 智能 URL 补全与请求 =================
 
-def _post(base_url: str, api_key: str, endpoint: str, payload: dict) -> dict:
-    url  = base_url.rstrip("/") + endpoint
+def safe_url_join(base, path):
+    """智能处理 URL 拼接，确保 path 前缀正确"""
+    base = base.strip().rstrip('/')
+    if path.startswith('/'):
+        return base + path
+    return base + '/' + path
+
+def _post(base_url: str, api_key: str, endpoint_type: str, payload: dict) -> dict:
+    """
+    endpoint_type: 'chat' 或 'embed'
+    """
+    # 智能补全逻辑
+    full_url = base_url.strip()
+    
+    if endpoint_type == 'chat':
+        # 如果 URL 里没写 /chat/completions，就补上
+        if "/chat/completions" not in full_url:
+            full_url = safe_url_join(full_url, "/chat/completions")
+    elif endpoint_type == 'embed':
+        if "/embeddings" not in full_url:
+            full_url = safe_url_join(full_url, "/embeddings")
+
     hdrs = {
         "Content-Type":  "application/json",
         "Authorization": f"Bearer {api_key}",
     }
-    resp = requests.post(url, headers=hdrs, json=payload, timeout=120)
+    
+    resp = requests.post(full_url, headers=hdrs, json=payload, timeout=180)
     resp.raise_for_status()
     return resp.json()
 
@@ -112,11 +119,11 @@ def chat_complete(system: str, user: str,
                   base_url=None, api_key=None,
                   model=None, temperature=None) -> str:
     data = _post(
-        base_url    or LLM_ENDPOINT,
-        api_key     or LLM_KEY,
-        "/chat/completions",
+        base_url or LLM_ENDPOINT,
+        api_key  or LLM_KEY,
+        'chat',
         {
-            "model":       model       or LLM_MODEL,
+            "model":       model or LLM_MODEL,
             "temperature": temperature if temperature is not None else LLM_TEMPERATURE,
             "messages": [
                 {"role": "system", "content": system},
@@ -128,152 +135,74 @@ def chat_complete(system: str, user: str,
     return data["choices"][0]["message"]["content"].strip()
 
 def embed_text(text: str) -> list:
-    data = _post(LLM_ENDPOINT, LLM_KEY, "/embeddings", {
+    data = _post(LLM_ENDPOINT, LLM_KEY, 'embed', {
         "model": EMBED_MODEL,
         "input": text,
     })
     return data["data"][0]["embedding"]
-
-# ================= 向量归一化 =================
 
 def normalize(vec: list) -> np.ndarray:
     arr  = np.array(vec, dtype=np.float32)
     norm = np.linalg.norm(arr)
     return arr / norm if norm > 0 else arr
 
-# ================= FAISS =================
-
-def init_faiss() -> faiss.Index:
-    if os.path.exists(FAISS_INDEX_PATH):
-        log.info(f"加载已有 FAISS 索引: {FAISS_INDEX_PATH}")
-        return faiss.read_index(FAISS_INDEX_PATH)
-    log.info(f"新建 FAISS 索引 (dim={DIMENSION}, 余弦相似度)")
-    return faiss.IndexFlatIP(DIMENSION)
-
-def save_faiss(index: faiss.Index):
-    faiss.write_index(index, FAISS_INDEX_PATH)
-    log.info(f"FAISS 已保存: {FAISS_INDEX_PATH} (共 {index.ntotal} 条)")
-
-# ================= SQLite =================
-
-def init_sqlite() -> sqlite3.Connection:
-    conn = sqlite3.connect(SQLITE_PATH)
-    conn.execute("""
-        CREATE TABLE IF NOT EXISTS chunks (
-            faiss_id    INTEGER PRIMARY KEY,
-            text        TEXT NOT NULL,
-            source_file TEXT NOT NULL
-        )
-    """)
-    conn.commit()
-    return conn
-
-# ================= 自增 ID =================
-
-def get_current_id() -> int:
-    if not os.path.exists(ID_COUNTER_PATH):
-        return 0
-    with open(ID_COUNTER_PATH, "r") as f:
-        return int(f.read().strip())
-
-def save_current_id(val: int):
-    with open(ID_COUNTER_PATH, "w") as f:
-        f.write(str(val))
-
-# ================= 用户确认 =================
-
 def ask_user(question: str) -> bool:
     while True:
         ans = input(f"\n{question} [y/n]: ").strip().lower()
-        if ans in ("y", "yes"):
-            return True
-        if ans in ("n", "no"):
-            return False
-        print("请输入 y 或 n")
+        if ans in ("y", "yes"): return True
+        if ans in ("n", "no"): return False
 
-# ================= 阶段 1：切割 =================
+# ================= 阶段 1：切割脚本自动化 =================
 
 def stage_split() -> bool:
     log.info("=" * 55)
     log.info("阶段 1：检查 chat.txt 切割状态")
 
-    existing = glob.glob(os.path.join(INPUT_DIR, "??-??.txt"))
+    existing = glob.glob(os.path.join(INPUT_DIR, "*.txt"))
     if existing:
-        log.info(f"chat/ 下已存在 {len(existing)} 个日期文件，跳过切割")
-        log.info("示例: " + ", ".join(os.path.basename(f) for f in existing[:5]))
+        log.info(f"目录已存在 {len(existing)} 个文件，跳过切割")
         return True
 
     if not os.path.exists(INPUT_CHAT_FILE):
-        log.warning(f"未找到 {INPUT_CHAT_FILE}，跳过切割阶段")
+        log.warning(f"未找到 {INPUT_CHAT_FILE}，无法切割")
         return False
 
-    log.info(f"chat/ 目录为空，准备切割 chat.txt")
-    log.info(f"辅助模型: {AUX_MODEL} @ {AUX_ENDPOINT}")
-
     with open(INPUT_CHAT_FILE, "r", encoding="utf-8") as f:
-        sample_lines = [f.readline() for _ in range(AUX_SAMPLE_LINES)]
-    sample_text = "".join(sample_lines)
+        sample = "".join([f.readline() for _ in range(AUX_SAMPLE_LINES)])
 
     prompt = f"""
 你是一个 Python 专家。请根据以下 chat.txt 的前 {AUX_SAMPLE_LINES} 行内容，编写一个自动化切割脚本。
 
-【输入文件格式说明】：
-{sample_text}
+【输入文件格式】：
+{sample}
 
-【需求详情】：
-1. 读取整个 'chat.txt'。
-2. 将对话按日期切割，保存到名为 'chat' 的目录中。
-3. 每个文件以 '月-日.txt' 命名（如 07-29.txt）。
-4. 文件内第一行必须是 '--月-日'。
-5. 过滤掉所有包含"已添加了"、"现在可以开始聊天了"等系统提示。
-6. 对话内容必须严格遵守以下格式：
-   发送方名称：消息内容
-7. 剔除无用的语句，如[表情包]等等。
+【需求】：
+1. 读取 'chat.txt'。
+2. 按日期切割，保存到 'chat' 目录。
+3. 文件以 '月-日.txt' 命名。
+4. 文件第一行必须是 '--月-日'。
+5. 过滤包含"已添加了"、"现在可以开始聊天了"等系统提示。
+6. 格式：发送方名称：消息内容。
+7. 剔除[表情包]等无用语句。
 
 【输出要求】：
-只输出 Python 代码，严禁包含 Markdown 代码块标记（如 ```python），直接输出纯代码，确保保存后可以直接运行。
+只输出纯 Python 代码，严禁 Markdown 标记。
 """
+    log.info("调用辅助模型生成脚本...")
+    code = chat_complete(
+        "你是一个只输出纯代码的生成器。", prompt,
+        base_url=AUX_ENDPOINT, api_key=AUX_KEY, model=AUX_MODEL, temperature=0.1
+    )
+    code = re.sub(r'^```python\s*\n|^```\s*\n|^```python|^```|```$', '', code, flags=re.MULTILINE).strip()
 
-    log.info("调用辅助模型生成切割脚本...")
+    with open(SPLIT_SCRIPT, "w", encoding="utf-8") as f: f.write(code)
+    
     try:
-        generated_code = chat_complete(
-            system="你是一个只输出纯代码的脚本生成器。",
-            user=prompt,
-            base_url=AUX_ENDPOINT,
-            api_key=AUX_KEY,
-            model=AUX_MODEL,
-            temperature=0.1,
-        )
-    except Exception as e:
-        log.error(f"辅助模型调用失败: {e}")
-        return False
-
-    # 清洗 markdown 标记
-    generated_code = re.sub(
-        r'^```python\s*\n|^```\s*\n|^```python|^```|```$',
-        '', generated_code, flags=re.MULTILINE
-    ).strip()
-
-    with open(SPLIT_SCRIPT, "w", encoding="utf-8") as f:
-        f.write(generated_code)
-    log.info(f"切割脚本已保存: {SPLIT_SCRIPT}")
-
-    log.info("执行切割脚本...")
-    try:
-        try:
-            subprocess.run(["python", SPLIT_SCRIPT], check=True)
-        except (subprocess.CalledProcessError, FileNotFoundError):
-            subprocess.run(["python3", SPLIT_SCRIPT], check=True)
-    except subprocess.CalledProcessError as e:
-        log.error(f"切割脚本执行失败，退出码: {e.returncode}")
-        return False
-    except Exception as e:
-        log.error(f"切割脚本执行异常: {e}")
-        return False
-
-    result = glob.glob(os.path.join(INPUT_DIR, "??-??.txt"))
-    log.info(f"切割完成，生成 {len(result)} 个日期文件")
-    return len(result) > 0
+        subprocess.run(["python", SPLIT_SCRIPT], check=True)
+    except:
+        subprocess.run(["python3", SPLIT_SCRIPT], check=True)
+    
+    return len(glob.glob(os.path.join(INPUT_DIR, "*.txt"))) > 0
 
 # ================= 阶段 2：场景增强 =================
 
@@ -291,136 +220,66 @@ ENHANCE_SYSTEM = """
 def stage_enhance():
     log.info("=" * 55)
     log.info("阶段 2：场景增强")
-
-    all_files = sorted(glob.glob(os.path.join(INPUT_DIR, "??-??.txt")))
-    if not all_files:
-        log.warning("chat/ 目录下未找到日期文件，跳过场景增强")
-        return
-
-    done_set = get_done_files()
-    pending  = [f for f in all_files
-                if os.path.basename(f) not in done_set
-                and not os.path.exists(os.path.join(SCENE_DIR, os.path.basename(f)))]
-
-    log.info(f"共 {len(all_files)} 个文件，待增强 {len(pending)} 个")
+    all_files = sorted(glob.glob(os.path.join(INPUT_DIR, "*.txt")))
+    done_set = get_done_list(SCENE_DONE_LOG)
+    pending = [f for f in all_files if os.path.basename(f) not in done_set]
 
     for filepath in pending:
-        filename   = os.path.basename(filepath)
-        scene_path = os.path.join(SCENE_DIR, filename)
-
-        with open(filepath, "r", encoding="utf-8") as f:
-            raw_text = f.read()
-        log.info(f"增强中: {filename}  原文 {len(raw_text)} 字")
-
+        fname = os.path.basename(filepath)
+        log.info(f"处理中: {fname}")
+        with open(filepath, "r", encoding="utf-8") as f: raw = f.read()
         try:
-            enhanced = chat_complete(
-                ENHANCE_SYSTEM,
-                f"请处理以下原始聊天记录，保留原文并增强语境：\n\n{raw_text}"
-            )
+            res = chat_complete(ENHANCE_SYSTEM, f"请处理原始记录并增强语境：\n\n{raw}", 
+                                base_url=AUX_ENDPOINT, api_key=AUX_KEY, model=AUX_MODEL, temperature=0.3)
+            with open(os.path.join(SCENE_DIR, fname), "w", encoding="utf-8") as f: f.write(res)
+            mark_done(SCENE_DONE_LOG, fname)
         except Exception as e:
-            log.error(f"增强失败，跳过 {filename}: {e}")
-            continue
+            log.error(f"失败 {fname}: {e}")
 
-        with open(scene_path, "w", encoding="utf-8") as f:
-            f.write(enhanced)
-        log.info(f"增强完成: {scene_path}  ({len(enhanced)} 字)")
+# ================= 阶段 3：向量提取 (NPY) =================
 
-    log.info("场景增强阶段完成")
-
-# ================= 阶段 3：向量入库 =================
-
-def stage_embed():
+def stage_extract():
     log.info("=" * 55)
-    log.info("阶段 3：向量化入库 (FAISS + SQLite)")
-
-    index    = init_faiss()
-    conn     = init_sqlite()
-    done_set = get_done_files()
-    cur_id   = get_current_id()
-
+    log.info("阶段 3：向量提取与保存 (.npy)")
     files = sorted(glob.glob(os.path.join(SCENE_DIR, "*.txt")))
-    if not files:
-        log.warning("chat/xiangliang/ 目录下没有文件，跳过入库")
-        conn.close()
-        return
-
+    done_set = get_done_list(VECTOR_DONE_LOG)
     pending = [f for f in files if os.path.basename(f) not in done_set]
-    log.info(f"共 {len(files)} 个增强文件，待入库 {len(pending)} 个")
 
     for filepath in pending:
-        filename = os.path.basename(filepath)
-        with open(filepath, "r", encoding="utf-8") as f:
-            content = f.read()
-
-        chunks    = [c.strip() for c in content.split("---") if c.strip()]
-        ok_count  = 0
-        err_count = 0
-        log.info(f"处理文件: {filename}  ({len(chunks)} 个片段)")
-
+        fname = os.path.basename(filepath)
+        base = os.path.splitext(fname)[0]
+        with open(filepath, "r", encoding="utf-8") as f: content = f.read()
+        chunks = [c.strip() for c in content.split("---") if c.strip()]
+        
+        vectors, metas = [], []
         for i, chunk in enumerate(chunks, start=1):
             try:
-                norm_vec = normalize(embed_text(chunk))
+                vec = normalize(embed_text(chunk))
+                vectors.append(vec)
+                metas.append({"index": i, "text": chunk, "file": fname})
+                log.info(f"  {fname} [{i}/{len(chunks)}] 成功")
             except Exception as e:
-                log.warning(f"片段 {i}/{len(chunks)} 向量化失败: {e}")
-                err_count += 1
-                continue
+                log.warning(f"  跳过片段: {e}")
 
-            index.add(norm_vec.reshape(1, -1))
-            conn.execute(
-                "INSERT INTO chunks (faiss_id, text, source_file) VALUES (?, ?, ?)",
-                (cur_id, chunk, filename)
-            )
-            conn.commit()
-            save_faiss(index)
-            cur_id += 1
-            save_current_id(cur_id)
-            ok_count += 1
-            log.info(f"片段 {i}/{len(chunks)} 入库  faiss_id={cur_id - 1}  字数={len(chunk)}")
-
-        mark_done(filename)
-        log.info(
-            f"文件完成: {filename}  成功={ok_count}  失败={err_count}  "
-            f"FAISS 累计={index.ntotal}"
-        )
-        log.info("-" * 55)
-
-    conn.close()
-    log.info("全部文件处理完毕")
-    log.info(f"FAISS 索引    : {FAISS_INDEX_PATH}")
-    log.info(f"SQLite 元数据 : {SQLITE_PATH}")
-    log.info(f"当前总向量数  : {index.ntotal}")
+        if vectors:
+            np.save(os.path.join(VECTOR_DIR, f"{base}_vectors.npy"), np.vstack(vectors))
+            np.save(os.path.join(VECTOR_DIR, f"{base}_meta.npy"), np.array(metas, dtype=object))
+            mark_done(VECTOR_DONE_LOG, fname)
+            log.info(f"保存完毕: {fname}")
 
 # ================= 主入口 =================
 
 def main():
-    log.info("pipeline 启动")
+    log.info("Pipeline 启动")
+    if not stage_split(): return
+    
+    if ask_user("是否进行场景增强？"):
+        stage_enhance()
+        
+    if ask_user("是否提取向量并保存？"):
+        stage_extract()
 
-    # 阶段 1：切割
-    split_ok = stage_split()
-    if not split_ok:
-        log.warning("chat/ 下无有效日期文件，流程终止")
-        return
-
-    date_files = glob.glob(os.path.join(INPUT_DIR, "??-??.txt"))
-    print(f"\n[INFO] chat/ 目录下检测到 {len(date_files)} 个日期文件")
-
-    # 询问是否进行向量处理前准备
-    if not ask_user("是否开始向量处理前准备（场景增强）？"):
-        log.info("用户跳过场景增强，流程结束")
-        return
-
-    # 阶段 2：场景增强
-    stage_enhance()
-
-    # 询问是否进行向量入库
-    if not ask_user("场景增强已完成，是否开始向量化并插入数据库？"):
-        log.info("用户跳过向量入库，流程结束")
-        return
-
-    # 阶段 3：向量入库
-    stage_embed()
-    log.info("pipeline 全流程完成")
-
+    log.info("全流程结束")
 
 if __name__ == "__main__":
     main()

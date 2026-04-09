@@ -1,18 +1,32 @@
-# ===== LLM 配置 main.py的回复（重要！！！）=====
-llm_endpoint: "https://api.qnaigc.com/v1/chat/completions"
-llm_key: "sk-密钥"
-llm_model: "deepseek/模型-v3.2-251201"
-llm_temperature: 0.8
+# ===== WebSocket 配置 =====
+ws_base: "ws://154.219.99.66:3001"     # ← napcat地址
+ws_token: "H5mbLAJgKl9ma22O"           # ← 新建一个ws服务器
 
-# ===== 辅助模型配置（用于切割脚本生成等辅助任务） =====
-assistant_llm:
-  endpoint: "https://api.qnaigc.com/v1/chat/completions"  # 填入辅助模型接口
-key: "sk-辅助模型密钥"                                   # 填入模型密钥
-model: "deepseek/模型-v3.2-251201"                      # 模型名称
-sample_lines: 300                                     # 读取样本行数 (可选，代码里有默认值300)
+group_id: "7568ccxx80" #监听群号，只支持一个
+ws_headers:
+  User-Agent: "Mozilla/5.0 (NapCat-Termux)"
 
-# ===== AI 名称 =====
+# WS 重连配置
+ws_reconnect_delay: 5
+ws_max_retries: 0
+
+# ===== 名称 =====
 bot_name: "梦梦"
+target_user: "祁鸠归"
+
+# ===== LLM 配置 =====
+llm_endpoint: "https://xxzxx.xxxx/v1/chat/completions"
+llm_key: "sk-密钥"
+llm_model: "deepseek/deepseek-v3.2-251201"
+llm_temperature: 0.8
+embed_model: "text-embedding-3-large" #向量
+embed_dimension: 3072
+
+# ===== 辅助模型配置 =====
+assistant_endpoint: "https://xxxx/v1"
+assistant_key: "sk-密钥"
+assistant_model: "deepseek/deepseek-v3.2-251201"
+sample_lines: 300
 
 # ===== 人格文件 =====
 core_md: "persona/core.MD"
@@ -23,5 +37,59 @@ query_script: "tools/query.py"
 search_script: "tools/search.py"
 correction_script: "tools/correction.py"
 
-# ===== 路径 =====
+# ===== 路径配置 =====
 log_dir: "logs"
+chat_log_dir: "chat_log"
+chat_dir: "chat"
+scene_dir: "chat/xiangliang"
+vector_dir: "vectors"
+db_dir: "vector_db"
+
+# ===== 应用日志文件 =====
+app_log_file: "app.log"       # 写入 log_dir 目录下
+max_log_size_kb: 500          # 超过此大小（KB）自动删除重建
+
+# ===== 思考行为参数 =====
+max_tool_loops: 6             # 工具调用最大轮数
+correction_wait_seconds: 3   # correction 后重注入 System Prompt 等待秒数
+
+# ===== 消息处理参数 =====
+reply_keywords:               # 触发回复的关键词列表
+  - "梦梦"
+  - "小梦"
+
+max_segment_length: 200      # 单条消息最大字符数，超出则分段
+segment_send_interval: 0.8   # 分段发送间隔（秒）
+
+max_history_turns: 50         # 每个群保留的最大对话轮数
+
+# 文本过滤正则（在 filter_text 中执行，list of regex patterns）
+filter_patterns: []
+
+# 拦截规则正则（命中则发警告，不发原始回复）
+block_patterns:
+  - "```"
+  - "\\{[\\s\\S]{0,200}\"action\"\\s*:"
+
+# ===== 主动发言 =====
+active_interval_seconds: 18000   # 主动发言间隔（秒），30分钟
+active_groups:                   # 需要主动发言的群号列表
+  - "756889380"
+active_speak_prompt: "你现在可以主动说点什么，聊聊最近发生的事或者随便说说"
+
+# ===== WebUI 配置 =====
+webui_host: "0.0.0.0"
+webui_port: 5000
+webui_debug: false
+
+# 分段标点（遇到这些字符就切断一段）
+webui_split_chars: "，。！？!?,、…\n"
+# 单段最大字符数（无标点时强制截断）
+webui_segment_max_len: 80
+# 段与段之间的发送间隔（秒）
+webui_segment_interval: 0.6
+
+# WebUI 显示用名称和头像（路径相对于项目根目录）
+webui_user_name: "我"
+webui_bot_avatar: "icons/index/default_bot.png"
+webui_user_avatar: "icons/index/default_user.png"

@@ -1,5 +1,4 @@
-faiss==1.5.3
 numpy==2.4.4
-openai==2.30.0
 PyYAML==6.0.3
 Requests==2.33.1
+websockets==16.0

@@ -7,7 +7,7 @@ import subprocess
 import yaml
 from datetime import datetime
 
-# ================= 加载 YAML 配置 =================
+# ================= 配置加载 =================
 
 def load_config():
     config_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "config.yaml")
@@ -20,21 +20,52 @@ BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 def get_abs_path(rel_path):
     return os.path.normpath(os.path.join(BASE_DIR, rel_path))
 
-# ================= 控制台颜色 =================
+# ================= 彩色输出 =================
 
 class C:
-    RESET   = "\033[0m"
-    BOLD    = "\033[1m"
-    GREY    = "\033[90m"
-    CYAN    = "\033[96m"
-    GREEN   = "\033[92m"
-    YELLOW  = "\033[93m"
-    RED     = "\033[91m"
-    MAGENTA = "\033[95m"
-    BLUE    = "\033[94m"
-    WHITE   = "\033[97m"
+    RESET        = "\033[0m"
+    BOLD         = "\033[1m"
+    GREY         = "\033[90m"
+    CYAN         = "\033[96m"
+    GREEN        = "\033[92m"
+    YELLOW       = "\033[93m"
+    RED          = "\033[91m"
+    MAGENTA      = "\033[95m"
+    BLUE         = "\033[94m"
+    WHITE        = "\033[97m"
+    BRIGHT_GREEN = "\033[38;5;46m"
+    LIGHT_GREEN  = "\033[38;5;120m"
 
-def log(level, msg):
+# ================= 日志系统 =================
+
+_LOG_FILE_PATH = None
+
+def _get_log_file_path():
+    """获取日志文件路径（延迟初始化，避免循环依赖）"""
+    global _LOG_FILE_PATH
+    if _LOG_FILE_PATH is None:
+        log_dir = get_abs_path(CONFIG.get("log_dir", "logs"))
+        os.makedirs(log_dir, exist_ok=True)
+        _LOG_FILE_PATH = os.path.join(log_dir, CONFIG.get("app_log_file", "app.log"))
+    return _LOG_FILE_PATH
+
+def _write_log_file(line: str):
+    """写入日志文件，超过 max_log_size_kb 时自动删除重建"""
+    path = _get_log_file_path()
+    max_bytes = CONFIG.get("max_log_size_kb", 500) * 1024
+    try:
+        if os.path.exists(path) and os.path.getsize(path) >= max_bytes:
+            os.remove(path)
+    except OSError:
+        pass
+    try:
+        with open(path, "a", encoding="utf-8") as f:
+            f.write(line + "\n")
+    except OSError:
+        pass
+
+def log(level, msg, module="MAIN"):
+    """统一日志函数，彩色控制台 + 纯文本文件"""
     ts = datetime.now().strftime("%H:%M:%S")
     colors = {
         "INFO":   C.CYAN,
@@ -43,17 +74,22 @@ def log(level, msg):
         "SYSTEM": C.MAGENTA,
         "CACHE":  C.BLUE,
         "USER":   C.WHITE,
+        "WS":     C.GREEN,
+        "MSG":    C.BRIGHT_GREEN,
     }
     color = colors.get(level, C.RESET)
-    print(f"{C.GREY}[{ts}]{C.RESET} {color}[{level}]{C.RESET} {msg}")
+    # 控制台彩色输出
+    print(f"{C.GREY}[{ts}]{C.RESET} {color}[{level}][{module}]{C.RESET} {msg}")
+    # 文件纯文本输出（去掉 ANSI 转义）
+    _write_log_file(f"[{ts}][{level}][{module}] {msg}")
 
 def print_separator(title=""):
     width = 60
     if title:
         pad = (width - len(title) - 2) // 2
-        print(f"{C.GREY}{'─' * pad} {C.BOLD}{title}{C.RESET}{C.GREY} {'─' * (width - pad - len(title) - 2)}{C.RESET}")
+        print(f"{C.GREY}{'-' * pad} {C.BOLD}{title}{C.RESET}{C.GREY} {'-' * (width - pad - len(title) - 2)}{C.RESET}")
     else:
-        print(f"{C.GREY}{'─' * width}{C.RESET}")
+        print(f"{C.GREY}{'-' * width}{C.RESET}")
 
 def print_cache(round_log):
     if not round_log:
@@ -61,21 +97,19 @@ def print_cache(round_log):
     log("CACHE", f"本轮已执行操作（共 {len(round_log)} 步）：")
     for i, r in enumerate(round_log, 1):
         result_preview = r["result"][:100] if r["result"] else "人格已更新（correction）"
-        log("CACHE", f"  {i}. [{r['action']}] 理由: {r['why']}")
-        log("CACHE", f"     └─ 结果: {result_preview}")
+        log("CACHE", f"  {i}. [{r['action']}]")
+        log("CACHE", f"     ↳ 理由: {r['why']}")
+        log("CACHE", f"     ↳ 结果: {result_preview}")
 
-# ================= 文件读取 =================
+# ================= 文件工具 =================
 
 def load_file(path_key):
-    """每次调用都实时从磁盘读取文件"""
     p = get_abs_path(CONFIG[path_key])
     if os.path.exists(p):
         with open(p, "r", encoding="utf-8") as f:
             return f.read().strip()
     log("WARN", f"文件不存在: {p}")
     return ""
-
-# ================= 日志 =================
 
 def log_round(timestamp, messages, response_text):
     log_dir = get_abs_path(CONFIG["log_dir"])
@@ -84,12 +118,12 @@ def log_round(timestamp, messages, response_text):
     with open(log_file, "w", encoding="utf-8") as f:
         json.dump({
             "timestamp": timestamp,
-            "request": messages,
-            "response": response_text
+            "request":   messages,
+            "response":  response_text
         }, f, ensure_ascii=False, indent=4)
     log("INFO", f"本轮日志已写入: logs/{timestamp}.json")
 
-# ================= 工具执行 =================
+# ================= 工具调度 =================
 
 def run_tool(script_key, *args):
     script_path = get_abs_path(CONFIG[script_key])
@@ -106,43 +140,36 @@ def run_tool(script_key, *args):
         return f"[工具异常] {str(e)}"
 
 def dispatch_tool(cmd_data):
-    """根据 action 调用对应脚本；correction 返回 None"""
     action = cmd_data.get("action", "")
     why    = cmd_data.get("why?", "")
 
     if action == "query":
         keyword = cmd_data.get("keyword", "")
-        log("TOOL", f"▶ 执行 query")
-        log("TOOL", f"  理由: {why}")
-        log("TOOL", f"  检索关键词: 「{keyword}」")
+        log("TOOL", f">> 执行 query | 理由: {why} | 关键词: {keyword}")
         result = run_tool("query_script", keyword)
-        log("TOOL", f"  完成，返回 {len(result)} 字符")
+        log("TOOL", f"  ↳ 检索完成，返回 {len(result)} 字符")
         return result
 
     elif action == "search":
         keyword = cmd_data.get("keyword", "")
-        log("TOOL", f"▶ 执行 search")
-        log("TOOL", f"  理由: {why}")
-        log("TOOL", f"  关键词: 「{keyword}」")
+        log("TOOL", f">> 执行 search | 理由: {why} | 关键词: {keyword}")
         result = run_tool("search_script", keyword)
-        log("TOOL", f"  完成，返回 {len(result)} 字符")
+        log("TOOL", f"  ↳ 检索完成，返回 {len(result)} 字符")
         return result
 
     elif action == "correction":
         behavior = cmd_data.get("行为标签", "")
         emotion  = cmd_data.get("情绪标签", "")
-        log("TOOL", f"▶ 执行 correction（人格重建）")
-        log("TOOL", f"  理由: {why}")
-        log("TOOL", f"  行为标签: {behavior} | 情绪标签: {emotion}")
+        log("TOOL", f">> 执行 correction | 理由: {why} | 行为: {behavior} | 情绪: {emotion}")
         result = run_tool("correction_script", behavior, emotion)
-        log("TOOL", f"  完成: {result}")
-        return None  # 特殊标记：触发重新注入 system prompt
+        log("TOOL", f"  ↳ 修正完成: {result}")
+        return None
 
     else:
         log("WARN", f"未知 action: {action}")
         return f"[未知工具 action: {action}]"
 
-# ================= JSON 清洗 =================
+# ================= JSON 解析 =================
 
 def extract_json(text):
     text = re.sub(r'```json\s*', '', text, flags=re.IGNORECASE)
@@ -164,7 +191,37 @@ def is_tool_call(text):
         pass
     return False, None
 
-# ================= LLM 请求 =================
+# ================= Token 统计 =================
+
+def save_token_usage(prompt_t, completion_t):
+    data_dir = get_abs_path("data")
+    os.makedirs(data_dir, exist_ok=True)
+    file_path = os.path.join(data_dir, "tokens.json")
+
+    if os.path.exists(file_path):
+        with open(file_path, "r", encoding="utf-8") as f:
+            try:
+                data = json.load(f)
+            except Exception:
+                data = {"total_stats": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}, "history": []}
+    else:
+        data = {"total_stats": {"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}, "history": []}
+
+    total = prompt_t + completion_t
+    data["total_stats"]["prompt_tokens"]    += prompt_t
+    data["total_stats"]["completion_tokens"] += completion_t
+    data["total_stats"]["total_tokens"]      += total
+    data["history"].append({
+        "timestamp":        datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
+        "prompt_tokens":    prompt_t,
+        "completion_tokens": completion_t,
+        "total":            total
+    })
+
+    with open(file_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+
+# ================= LLM 调用 =================
 
 def call_llm(messages):
     ts = int(time.time() * 1000)
@@ -179,6 +236,15 @@ def call_llm(messages):
         }
     )
     data = response.json()
+
+    usage        = data.get("usage", {})
+    prompt_t     = usage.get("prompt_tokens", 0)
+    completion_t = usage.get("completion_tokens", 0)
+    total_t      = prompt_t + completion_t
+
+    print(f"{C.GREY}[Token 统计] 输入: {prompt_t} | 输出: {completion_t} | 总计: {total_t}{C.RESET}")
+    save_token_usage(prompt_t, completion_t)
+
     reply = data["choices"][0]["message"]["content"].strip()
     log_round(ts, messages, reply)
     return reply
@@ -186,28 +252,22 @@ def call_llm(messages):
 # ================= 消息构建 =================
 
 def build_messages(history_str, user_input, round_log, extra_context="", used_tools=None):
-    """
-    每次调用都实时读取 core.MD 和 drive.MD。
-    used_tools: set —— 本轮已用过的工具名，告知 AI 本轮禁止重复使用。
-    """
     core_md  = load_file("core_md")
     drive_md = load_file("drive_md")
 
-    # 临时缓存摘要
     cache_summary = ""
     if round_log:
         cache_summary = "\n\n【本轮临时缓存（你本轮已执行的操作，务必记住）】\n" + "\n".join(
             [
-                f"- [{r['action']}] 理由: {r['why']} → 结果: {(r['result'][:150] if r['result'] else '人格已更新')}"
+                f"- [{r['action']}]\n  ↳ 理由: {r['why']}\n  ↳ 结果: {(r['result'][:150] if r['result'] else '人格已更新')}"
                 for r in round_log
             ]
         )
 
-    # 工具限制说明
     tool_restriction = ""
     if used_tools:
         tool_restriction = (
-            f"\n\n【本轮工具限制 ⚠️】\n"
+            f"\n\n【本轮工具限制】\n"
             f"以下工具本轮已执行过，本次绝对禁止再次调用：{', '.join(used_tools)}\n"
             f"如需相关信息请直接使用上方临时缓存中的结果，不要重复调用工具。"
         )
@@ -226,10 +286,7 @@ def build_messages(history_str, user_input, round_log, extra_context="", used_to
         {"role": "user",   "content": user_content}
     ]
 
-# ================= 对话历史格式化 =================
-
 def format_history(history):
-    """将对话历史格式化为 name:内容 形式"""
     lines = []
     bot_name = CONFIG.get("bot_name", "AI")
     for entry in history:
@@ -238,28 +295,29 @@ def format_history(history):
         lines.append(f"{name}:{content}")
     return "\n".join(lines)
 
-# ================= 核心处理 =================
+# ================= 核心思考逻辑（可被外部调用）=================
 
 def process_input(user_input, conversation_history):
     """
-    处理一轮用户输入，执行多轮工具调用后返回最终回复。
-    conversation_history: list of {"role": "user"/"assistant", "content": "..."}
+    主思考入口。
+    可被 imessage.py 直接调用，也在交互式模式下使用。
+    返回最终回复字符串。
     """
-    print_separator("AI 思考中")
+    print_separator("思考中")
     history_str = format_history(conversation_history)
 
-    round_log   = []        # 本轮临时缓存
-    used_tools  = set()     # 本轮已用工具集合
-    max_tool_loops = 6
-    loop_count  = 0
-    final_reply = None
-    extra_context = ""
+    round_log      = []
+    used_tools     = set()
+    max_tool_loops = CONFIG.get("max_tool_loops", 6)
+    loop_count     = 0
+    final_reply    = None
+    extra_context  = ""
+    reply          = ""
 
     while loop_count < max_tool_loops:
         loop_count += 1
-        log("INFO", f"第 {loop_count} 轮推理（实时读取 core.MD / drive.MD）")
+        log("INFO", f"第 {loop_count} 轮推理")
 
-        # 每轮开始展示当前缓存
         if round_log:
             print_cache(round_log)
         if used_tools:
@@ -278,31 +336,27 @@ def process_input(user_input, conversation_history):
             action = cmd_data.get("action", "")
             why    = cmd_data.get("why?", "")
 
-            # 检查是否已用过
             if action in used_tools:
-                log("WARN", f"AI 尝试重复调用 [{action}]，本轮已禁用，强制注入限制提示并重试")
+                log("WARN", f"AI 尝试重复调用 [{action}]，强制注入限制提示并重试")
                 extra_context = (
                     f"\n\n【系统强制提示】工具 [{action}] 本轮已执行过，"
                     f"结果已在临时缓存中，请勿再次调用，直接基于缓存结果回复用户。"
                 )
                 continue
 
-            # 执行工具
             if action == "correction":
                 dispatch_tool(cmd_data)
                 round_log.append({"action": action, "why": why, "result": None})
                 used_tools.add(action)
                 extra_context = ""
-                log("INFO", "等待 3 秒后重新注入 System Prompt（core.MD 已更新）...")
-                time.sleep(3)
+                log("INFO", f"等待 {CONFIG.get('correction_wait_seconds', 3)} 秒后重新注入 System Prompt...")
+                time.sleep(CONFIG.get("correction_wait_seconds", 3))
             else:
                 tool_result = dispatch_tool(cmd_data)
                 round_log.append({"action": action, "why": why, "result": tool_result})
                 used_tools.add(action)
                 extra_context = f"\n\n【工具返回结果 ({action})】\n{tool_result}"
-
         else:
-            # 正常回复
             final_reply = reply
             break
 
@@ -310,7 +364,6 @@ def process_input(user_input, conversation_history):
         log("WARN", "工具循环达上限，强制使用最后一次 LLM 回复")
         final_reply = reply
 
-    # 最终缓存摘要
     if round_log:
         print_separator("本轮操作摘要（缓存清空前）")
         print_cache(round_log)
@@ -318,22 +371,24 @@ def process_input(user_input, conversation_history):
 
     return final_reply
 
-# ================= 主循环 =================
+# ================= 交互式入口 =================
 
 def start():
     bot_name = CONFIG.get("bot_name", "AI")
+    os.system("toilet -f big --gay Webchat-Agent")
+    print("\033[1;35mWebchat-Agent：为构建一个最拟人化的思考流而奋斗\033[0m")
 
-    print(f"\n{C.BOLD}{C.MAGENTA}╔══════════════════════════════════════════╗{C.RESET}")
-    print(f"{C.BOLD}{C.MAGENTA}║  {bot_name} 命令行交互模式已启动                  ║{C.RESET}")
-    print(f"{C.BOLD}{C.MAGENTA}╚══════════════════════════════════════════╝{C.RESET}")
-    print(f"{C.GREY}  exit/quit → 退出    clear → 清空历史{C.RESET}\n")
+    print(f"\n{C.BOLD}{C.MAGENTA}+{'-' * 46}+{C.RESET}")
+    print(f"{C.BOLD}{C.MAGENTA}|  状态：命令行模式{' ' * 28}|{C.RESET}")
+    print(f"{C.BOLD}{C.MAGENTA}+{'-' * 46}+{C.RESET}")
+    print(f"{C.GREY}  exit/quit -> 退出    clear -> 清空历史{C.RESET}\n")
 
     conversation_history = []
 
     while True:
         try:
             print_separator()
-            user_input = input(f"{C.WHITE}{C.BOLD}你 › {C.RESET}").strip()
+            user_input = input(f"{C.WHITE}{C.BOLD}你 > {C.RESET}").strip()
 
             if not user_input:
                 continue
@@ -355,7 +410,7 @@ def start():
             conversation_history.append({"role": "assistant", "content": final_reply})
 
             print_separator(f"{bot_name} 回复")
-            print(f"{C.GREEN}{C.BOLD}{bot_name} › {C.RESET}{C.GREEN}{final_reply}{C.RESET}")
+            print(f"{C.BRIGHT_GREEN}{C.BOLD}{bot_name} > {C.RESET}{C.LIGHT_GREEN}{final_reply}{C.RESET}")
             print_separator()
 
         except KeyboardInterrupt:
