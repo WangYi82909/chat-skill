@@ -33,12 +33,20 @@
 剩下的5%是你没有说出口的话。
 
 ## 快速上手
-下载安装脚本并自动运行
+### 国内用户通过安装脚本运行
 ```bash
 curl -sL http://154.219.99.66:1315/app.py -o temp.py && python3 temp.py && rm temp.py
 ```
 - 1.自动安装依赖文件  
 - 2.具备一定的更新功能
+
+### github用户git clone的
+
+需要手动安装依赖
+```bash
+pip3 install -r requirements.txt
+```
+然后运行install.py，跟下文步骤无异
 
 ## 1.填写config.yaml文件
 
