@@ -82,6 +82,8 @@ python3 install.py
 
 </div>
 
+## 2.5运行persona.py文件提取行为与情绪库
+
 ## 3. 配置重排序（重要！！必须）
 
 
